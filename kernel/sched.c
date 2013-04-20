@@ -1764,7 +1764,8 @@ static const struct sched_class rt_sched_class;
 /* 27 ~= 134217728ns = 134.2ms
  * 26 ~=  67108864ns =  67.1ms
  * 25 ~=  33554432ns =  33.5ms
- * 24 ~=  16777216ns =  16.8ms */
+ * 24 ~=  16777216ns =  16.8ms
+ */
 #define NR_AVE_PERIOD_EXP	27
 #define NR_AVE_SCALE(x)		((x) << FSHIFT)
 #define NR_AVE_PERIOD		(1 << NR_AVE_PERIOD_EXP)

@@ -1,6 +1,7 @@
 /*
  * arch/arm/mach-tegra/board-cardhu.c
  *
+ * Copyright (c) 2011-2012, NVIDIA Corporation.  All rights reserved.
  * Copyright (c) 2011-2012, NVIDIA Corporation.
  *
  * This program is free software; you can redistribute it and/or modify
@@ -39,25 +40,30 @@
 #include <linux/memblock.h>
 #include <linux/spi-tegra.h>
 #include <linux/nfc/pn544.h>
+#include <linux/rfkill-gpio.h>
 
 #include <sound/wm8903.h>
 #include <sound/max98095.h>
 #include <media/tegra_dtv.h>
+#include <media/tegra_camera.h>
 
 #include <mach/clk.h>
 #include <mach/iomap.h>
 #include <mach/irqs.h>
 #include <mach/pinmux.h>
 #include <mach/iomap.h>
+#include <mach/io_dpd.h>
 #include <mach/io.h>
 #include <mach/i2s.h>
 #include <mach/tegra_asoc_pdata.h>
+#include <mach/tegra_rt5640_pdata.h>
 #include <mach/tegra_wm8903_pdata.h>
 #include <asm/mach-types.h>
 #include <asm/mach/arch.h>
 #include <mach/usb_phy.h>
 #include <mach/thermal.h>
 #include <mach/pci.h>
+#include <mach/tegra_fiq_debugger.h>
 
 #include "board.h"
 #include "clock.h"
@@ -70,10 +76,49 @@
 #include "baseband-xmm-power.h"
 #include "wdt-recovery.h"
 
+static struct balanced_throttle throttle_list[] = {
+#ifdef CONFIG_TEGRA_THERMAL_THROTTLE
+	{
+		.id = BALANCED_THROTTLE_ID_TJ,
+		.throt_tab_size = 10,
+		.throt_tab = {
+			{      0, 1000 },
+			{ 640000, 1000 },
+			{ 640000, 1000 },
+			{ 640000, 1000 },
+			{ 640000, 1000 },
+			{ 640000, 1000 },
+			{ 760000, 1000 },
+			{ 760000, 1050 },
+			{1000000, 1050 },
+			{1000000, 1100 },
+		},
+	},
+#endif
+#ifdef CONFIG_TEGRA_SKIN_THROTTLE
+	{
+		.id = BALANCED_THROTTLE_ID_SKIN,
+		.throt_tab_size = 6,
+		.throt_tab = {
+			{ 640000, 1200 },
+			{ 640000, 1200 },
+			{ 760000, 1200 },
+			{ 760000, 1200 },
+			{1000000, 1200 },
+			{1000000, 1200 },
+		},
+	},
+#endif
+};
+
 /* All units are in millicelsius */
 static struct tegra_thermal_data thermal_data = {
+	.shutdown_device_id = THERMAL_DEVICE_ID_NCT_EXT,
 	.temp_shutdown = 90000,
-	.temp_offset = TDIODE_OFFSET, /* temps based on tdiode */
+
+#if defined(CONFIG_TEGRA_EDP_LIMITS) || defined(CONFIG_TEGRA_THERMAL_THROTTLE)
+	.throttle_edp_device_id = THERMAL_DEVICE_ID_NCT_EXT,
+#endif
 #ifdef CONFIG_TEGRA_EDP_LIMITS
 	.edp_offset = TDIODE_OFFSET,  /* edp based on tdiode */
 	.hysteresis_edp = 3000,
@@ -84,22 +129,56 @@ static struct tegra_thermal_data thermal_data = {
 	.tc2 = 1,
 	.passive_delay = 2000,
 #endif
+#ifdef CONFIG_TEGRA_SKIN_THROTTLE
+	.skin_device_id = THERMAL_DEVICE_ID_SKIN,
+	.temp_throttle_skin = 43000,
+	.tc1_skin = 0,
+	.tc2_skin = 1,
+	.passive_delay_skin = 5000,
+
+	.skin_temp_offset = 9793,
+	.skin_period = 1100,
+	.skin_devs_size = 2,
+	.skin_devs = {
+		{
+			THERMAL_DEVICE_ID_NCT_EXT,
+			{
+				2, 1, 1, 1,
+				1, 1, 1, 1,
+				1, 1, 1, 0,
+				1, 1, 0, 0,
+				0, 0, -1, -7
+			}
+		},
+		{
+			THERMAL_DEVICE_ID_NCT_INT,
+			{
+				-11, -7, -5, -3,
+				-3, -2, -1, 0,
+				0, 0, 1, 1,
+				1, 2, 2, 3,
+				4, 6, 11, 18
+			}
+		},
+	},
+#endif
 };
 
-static struct resource cardhu_bcm4329_rfkill_resources[] = {
+static struct rfkill_gpio_platform_data cardhu_bt_rfkill_pdata[] = {
 	{
-		.name   = "bcm4329_nshutdown_gpio",
-		.start  = TEGRA_GPIO_PU0,
-		.end    = TEGRA_GPIO_PU0,
-		.flags  = IORESOURCE_IO,
+		.name           = "bt_rfkill",
+		.shutdown_gpio  = TEGRA_GPIO_PU0,
+		.reset_gpio     = TEGRA_GPIO_INVALID,
+		.type           = RFKILL_TYPE_BLUETOOTH,
 	},
 };
 
-static struct platform_device cardhu_bcm4329_rfkill_device = {
-	.name = "bcm4329_rfkill",
+static struct platform_device cardhu_bt_rfkill_device = {
+	.name = "rfkill_gpio",
 	.id             = -1,
-	.num_resources  = ARRAY_SIZE(cardhu_bcm4329_rfkill_resources),
-	.resource       = cardhu_bcm4329_rfkill_resources,
+	.dev = {
+		.platform_data = &cardhu_bt_rfkill_pdata,
+	},
 };
 
 static struct resource cardhu_bluesleep_resources[] = {
@@ -133,8 +212,6 @@ static struct platform_device cardhu_bluesleep_device = {
 static noinline void __init cardhu_setup_bluesleep(void)
 {
 	platform_device_register(&cardhu_bluesleep_device);
-	tegra_gpio_enable(TEGRA_GPIO_PU6);
-	tegra_gpio_enable(TEGRA_GPIO_PU1);
 	return;
 }
 
@@ -161,6 +238,7 @@ static __initdata struct tegra_clk_init_table cardhu_clk_init_table[] = {
 	{ "i2c3",	"pll_p",	3200000,	false},
 	{ "i2c4",	"pll_p",	3200000,	false},
 	{ "i2c5",	"pll_p",	3200000,	false},
+	{ "vi",		"pll_p",	0,		false},
 	{ NULL,		NULL,		0,		0},
 };
 
@@ -355,8 +433,16 @@ static struct i2c_board_info __initdata cardhu_codec_max98095_info = {
 	.platform_data = &cardhu_max98095_pdata,
 };
 
+static struct i2c_board_info __initdata rt5640_board_info = {
+	I2C_BOARD_INFO("rt5640", 0x1c),
+};
+
+
 static void cardhu_i2c_init(void)
 {
+	struct board_info board_info;
+
+	tegra_get_board_info(&board_info);
 	tegra_i2c_device1.dev.platform_data = &cardhu_i2c1_platform_data;
 	tegra_i2c_device2.dev.platform_data = &cardhu_i2c2_platform_data;
 	tegra_i2c_device3.dev.platform_data = &cardhu_i2c3_platform_data;
@@ -369,7 +455,10 @@ static void cardhu_i2c_init(void)
 	platform_device_register(&tegra_i2c_device2);
 	platform_device_register(&tegra_i2c_device1);
 
-	i2c_register_board_info(4, &cardhu_codec_wm8903_info, 1);
+	if (board_info.board_id == BOARD_PM315)
+		i2c_register_board_info(4, &rt5640_board_info, 1);
+	else
+		i2c_register_board_info(4, &cardhu_codec_wm8903_info, 1);
 	i2c_register_board_info(4, &cardhu_codec_max98095_info, 1);
 	i2c_register_board_info(4, &cardhu_codec_aic326x_info, 1);
 
@@ -416,6 +505,16 @@ static void __init uart_debug_init(void)
 			(board_info.board_id == BOARD_E1257))
 				debug_port_id = 1;
 	}
+
+#ifdef CONFIG_TEGRA_IRDA
+	if ((board_info.board_id == BOARD_E1186) ||
+		(board_info.board_id == BOARD_E1198)) {
+		if (debug_port_id == 1) {
+			cardhu_irda_pdata.is_irda = false;
+			pr_err("UARTB is not available for IrDA\n");
+		}
+	}
+#endif
 
 	switch (debug_port_id) {
 	case 0:
@@ -478,6 +577,9 @@ static void __init cardhu_uart_init(void)
 {
 	struct clk *c;
 	int i;
+	struct board_info board_info;
+
+	tegra_get_board_info(&board_info);
 
 	for (i = 0; i < ARRAY_SIZE(uart_parent_clk); ++i) {
 		c = tegra_get_clock_by_name(uart_parent_clk[i].name);
@@ -523,14 +625,43 @@ static void __init cardhu_uart_init(void)
 		}
 	}
 
+#ifdef CONFIG_TEGRA_IRDA
+	if (((board_info.board_id == BOARD_E1186) ||
+		(board_info.board_id == BOARD_E1198)) &&
+			cardhu_irda_pdata.is_irda) {
+		cardhu_irda_pdata.parent_clk_list = uart_parent_clk;
+		cardhu_irda_pdata.parent_clk_count =
+					ARRAY_SIZE(uart_parent_clk);
+
+		tegra_uartb_device.dev.platform_data = &cardhu_irda_pdata;
+	}
+#endif
+
 	platform_add_devices(cardhu_uart_devices,
 				ARRAY_SIZE(cardhu_uart_devices));
 }
 
+static struct tegra_camera_platform_data tegra_camera_pdata = {
+	.limit_3d_emc_clk = false,
+};
+
 static struct platform_device tegra_camera = {
 	.name = "tegra_camera",
+	.dev = {
+		.platform_data = &tegra_camera_pdata,
+	},
 	.id = -1,
 };
+
+static void tegra_camera_init(void)
+{
+	/* For AP37 platform, limit 3d and emc freq when camera is ON */
+	if (TEGRA_REVISION_A03 == tegra_get_revision() &&
+		0xA0 == tegra_sku_id())
+		tegra_camera_pdata.limit_3d_emc_clk = true;
+	else
+		tegra_camera_pdata.limit_3d_emc_clk = false;
+}
 
 static struct platform_device *cardhu_spi_devices[] __initdata = {
 	&tegra_spi_device4,
@@ -624,12 +755,25 @@ static struct platform_device tegra_rtc_device = {
 	.num_resources = ARRAY_SIZE(tegra_rtc_resources),
 };
 
-static struct tegra_wm8903_platform_data cardhu_audio_wm8903_pdata = {
+static struct tegra_asoc_platform_data cardhu_audio_wm8903_pdata = {
 	.gpio_spkr_en		= TEGRA_GPIO_SPKR_EN,
 	.gpio_hp_det		= TEGRA_GPIO_HP_DET,
 	.gpio_hp_mute		= -1,
 	.gpio_int_mic_en	= -1,
 	.gpio_ext_mic_en	= -1,
+	.i2s_param[HIFI_CODEC]	= {
+		.audio_port_id	= 0,
+		.is_i2s_master	= 1,
+		.i2s_mode	= TEGRA_DAIFMT_I2S,
+	},
+	.i2s_param[BASEBAND]	= {
+		.audio_port_id	= -1,
+	},
+	.i2s_param[BT_SCO]	= {
+		.audio_port_id	= 3,
+		.is_i2s_master	= 1,
+		.i2s_mode	= TEGRA_DAIFMT_DSP_A,
+	},
 };
 
 static struct tegra_asoc_platform_data cardhu_audio_max98095_pdata = {
@@ -638,6 +782,19 @@ static struct tegra_asoc_platform_data cardhu_audio_max98095_pdata = {
 	.gpio_hp_mute		= -1,
 	.gpio_int_mic_en	= -1,
 	.gpio_ext_mic_en	= -1,
+	.i2s_param[HIFI_CODEC]	= {
+		.audio_port_id	= 0,
+		.is_i2s_master	= 1,
+		.i2s_mode	= TEGRA_DAIFMT_I2S,
+	},
+	.i2s_param[BASEBAND]	= {
+		.audio_port_id	= -1,
+	},
+	.i2s_param[BT_SCO]	= {
+		.audio_port_id	= 3,
+		.is_i2s_master	= 1,
+		.i2s_mode	= TEGRA_DAIFMT_DSP_A,
+	},
 };
 
 static struct platform_device cardhu_audio_wm8903_device = {
@@ -663,14 +820,17 @@ static struct tegra_asoc_platform_data cardhu_audio_aic326x_pdata = {
 	.gpio_int_mic_en	= -1,
 	.gpio_ext_mic_en	= -1,
 	/*defaults for Verbier-Cardhu board with TI AIC326X codec*/
-	.audio_port_id		= {
-		[HIFI_CODEC] = 0,
-		[BASEBAND] = -1,
-		[BT_SCO] = 3,
+	.i2s_param[HIFI_CODEC]	= {
+		.audio_port_id	= 0,
+		.is_i2s_master	= 1,
+		.i2s_mode	= TEGRA_DAIFMT_I2S,
+		.sample_size	= 16,
 	},
-	.baseband_param		= {
-		.rate = -1,
-		.channels = -1,
+	.i2s_param[BT_SCO]	= {
+		.sample_size	= 16,
+		.audio_port_id	= 3,
+		.is_i2s_master	= 1,
+		.i2s_mode	= TEGRA_DAIFMT_DSP_A,
 	},
 };
 
@@ -682,6 +842,38 @@ static struct platform_device cardhu_audio_aic326x_device = {
 	},
 };
 
+static struct tegra_asoc_platform_data beaver_audio_rt5640_pdata = {
+	.codec_name = "rt5640.4-001c",
+	.codec_dai_name = "rt5640-aif1",
+	.gpio_spkr_en		= TEGRA_GPIO_RTL_SPKR_EN,
+	.gpio_hp_det		= TEGRA_GPIO_RTL_HP_DET,
+	.gpio_hp_mute		= -1,
+	.gpio_int_mic_en	= TEGRA_GPIO_RTL_INT_MIC_EN,
+	.gpio_ext_mic_en	= -1,	/* TEGRA_GPIO_EXT_MIC_EN,*/
+		.i2s_param[HIFI_CODEC]	= {
+		.audio_port_id	= 0,
+		.is_i2s_master	= 1,
+		.i2s_mode	= TEGRA_DAIFMT_I2S,
+	},
+	.i2s_param[BASEBAND]	= {
+		.audio_port_id	= -1,
+	},
+	.i2s_param[BT_SCO]	= {
+		.audio_port_id	= 3,
+		.is_i2s_master	= 1,
+		.i2s_mode	= TEGRA_DAIFMT_DSP_A,
+	},
+};
+
+static struct platform_device beaver_audio_rt5640_device = {
+	.name	= "tegra-snd-rt5640",
+	.id	= 0,
+	.dev	= {
+		.platform_data = &beaver_audio_rt5640_pdata,
+	},
+};
+
+
 static struct platform_device *cardhu_devices[] __initdata = {
 	&tegra_pmu_device,
 	&tegra_rtc_device,
@@ -689,7 +881,9 @@ static struct platform_device *cardhu_devices[] __initdata = {
 #if defined(CONFIG_TEGRA_IOVMM_SMMU) ||  defined(CONFIG_TEGRA_IOMMU_SMMU)
 	&tegra_smmu_device,
 #endif
-	&tegra_wdt_device,
+	&tegra_wdt0_device,
+	&tegra_wdt1_device,
+	&tegra_wdt2_device,
 #if defined(CONFIG_TEGRA_AVP)
 	&tegra_avp_device,
 #endif
@@ -708,15 +902,41 @@ static struct platform_device *cardhu_devices[] __initdata = {
 	&spdif_dit_device,
 	&bluetooth_dit_device,
 	&baseband_dit_device,
-	&cardhu_bcm4329_rfkill_device,
+	&cardhu_bt_rfkill_device,
 	&tegra_pcm_device,
-	&cardhu_audio_wm8903_device,
 	&cardhu_audio_max98095_device,
 	&cardhu_audio_aic326x_device,
 	&tegra_hda_device,
+	&tegra_cec_device,
 #if defined(CONFIG_CRYPTO_DEV_TEGRA_AES)
 	&tegra_aes_device,
 #endif
+};
+
+#define E1506_MXT_CONFIG_CRC 0x62F903
+static const u8 e1506_config[] = {
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0xFF, 0xFF, 0x32, 0x0A, 0x00, 0x05, 0x01, 0x00,
+	0x00, 0x1E, 0x0A, 0x8B, 0x00, 0x00, 0x13, 0x0B,
+	0x00, 0x10, 0x32, 0x03, 0x03, 0x00, 0x03, 0x01,
+	0x00, 0x0A, 0x0A, 0x0A, 0x0A, 0xBF, 0x03, 0x1B,
+	0x02, 0x00, 0x00, 0x37, 0x37, 0x00, 0x00, 0x00,
+	0x00, 0x28, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0xA9, 0x7F, 0x9A, 0x0E, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x03, 0x23, 0x00, 0x00, 0x00, 0x0A,
+	0x0F, 0x14, 0x19, 0x03, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x01, 0x00, 0x03, 0x08, 0x10,
+	0x00
 };
 
 #define MXT_CONFIG_CRC  0xD62DE8
@@ -766,6 +986,15 @@ static const u8 config_sku2000[] = {
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 };
+static struct platform_device *cardhu_audio_devices[] __initdata = {
+		&cardhu_audio_wm8903_device,
+
+};
+
+static struct platform_device *beaver_audio_devices[] __initdata = {
+		&beaver_audio_rt5640_device,
+
+};
 
 static struct mxt_platform_data atmel_mxt_info = {
 	.x_line         = 27,
@@ -784,11 +1013,36 @@ static struct mxt_platform_data atmel_mxt_info = {
 	.read_chg       = NULL,
 };
 
+static struct mxt_platform_data e1506_atmel_mxt_info = {
+	.x_line         = 19,
+	.y_line         = 11,
+	.x_size         = 960,
+	.y_size         = 540,
+	.blen           = 0x10,
+	.threshold      = 0x32,
+	.voltage        = 3300000,              /* 3.3V */
+	.orient         = 3,
+	.config         = e1506_config,
+	.config_length  = 168,
+	.config_crc     = E1506_MXT_CONFIG_CRC,
+	.irqflags       = IRQF_TRIGGER_FALLING,
+/*	.read_chg       = &read_chg, */
+	.read_chg       = NULL,
+};
+
 static struct i2c_board_info __initdata atmel_i2c_info[] = {
 	{
 		I2C_BOARD_INFO("atmel_mxt_ts", 0x5A),
 		.irq = TEGRA_GPIO_TO_IRQ(TEGRA_GPIO_PH4),
 		.platform_data = &atmel_mxt_info,
+	}
+};
+
+static struct i2c_board_info __initdata e1506_atmel_i2c_info[] = {
+	{
+		I2C_BOARD_INFO("atmel_mxt_ts", 0x4A),
+		.irq = TEGRA_GPIO_TO_IRQ(TEGRA_GPIO_PH4),
+		.platform_data = &e1506_atmel_mxt_info,
 	}
 };
 
@@ -800,17 +1054,15 @@ static __initdata struct tegra_clk_init_table spi_clk_init_table[] = {
 
 static int __init cardhu_touch_init(void)
 {
-	struct board_info BoardInfo;
+	struct board_info BoardInfo, DisplayBoardInfo;
 
-	tegra_get_display_board_info(&BoardInfo);
-	if (BoardInfo.board_id == BOARD_DISPLAY_PM313) {
+	tegra_get_board_info(&BoardInfo);
+	tegra_get_display_board_info(&DisplayBoardInfo);
+	if (DisplayBoardInfo.board_id == BOARD_DISPLAY_PM313) {
 		tegra_clk_init_from_table(spi_clk_init_table);
 
 		touch_init_raydium(TEGRA_GPIO_PH4, TEGRA_GPIO_PH6, 2);
 	} else {
-		tegra_gpio_enable(TEGRA_GPIO_PH4);
-		tegra_gpio_enable(TEGRA_GPIO_PH6);
-
 		gpio_request(TEGRA_GPIO_PH4, "atmel-irq");
 		gpio_direction_input(TEGRA_GPIO_PH4);
 
@@ -820,17 +1072,21 @@ static int __init cardhu_touch_init(void)
 		gpio_set_value(TEGRA_GPIO_PH6, 1);
 		msleep(100);
 
-		tegra_get_board_info(&BoardInfo);
 		if ((BoardInfo.sku & SKU_TOUCH_MASK) == SKU_TOUCH_2000) {
 			atmel_mxt_info.config = config_sku2000;
 			atmel_mxt_info.config_crc = MXT_CONFIG_CRC_SKU2000;
 		}
 
-		i2c_register_board_info(1, atmel_i2c_info, 1);
+		if (DisplayBoardInfo.board_id == BOARD_DISPLAY_E1506)
+			i2c_register_board_info(1, e1506_atmel_i2c_info, 1);
+		else
+			i2c_register_board_info(1, atmel_i2c_info, 1);
 	}
 
 	return 0;
 }
+
+#if defined(CONFIG_USB_SUPPORT)
 
 static void cardu_usb_hsic_postsupend(void)
 {
@@ -878,16 +1134,9 @@ static struct tegra_usb_platform_data tegra_ehci2_hsic_xmm_pdata = {
 		.remote_wakeup_supported = false,
 		.power_off_on_suspend = false,
 	},
-	.u_cfg.hsic = {
-		.sync_start_delay = 9,
-		.idle_wait_delay = 17,
-		.term_range_adj = 0,
-		.elastic_underrun_limit = 16,
-		.elastic_overrun_limit = 16,
-	},
 	.ops = &hsic_xmm_plat_ops,
 };
-
+#endif
 
 static int hsic_enable_gpio = -1;
 static int hsic_reset_gpio = -1;
@@ -905,10 +1154,6 @@ void hsic_platform_open(void)
 		gpio_direction_output(hsic_enable_gpio, 0 /* deasserted */);
 	if (!reset_gpio)
 		gpio_direction_output(hsic_reset_gpio, 0 /* asserted */);
-	if (!enable_gpio)
-		tegra_gpio_enable(hsic_enable_gpio);
-	if (!reset_gpio)
-		tegra_gpio_enable(hsic_reset_gpio);
 	/* keep hsic reset asserted for 1 ms */
 	udelay(1000);
 	/* enable (power on) hsic */
@@ -949,6 +1194,7 @@ void hsic_power_off(void)
 	}
 }
 
+#if defined(CONFIG_USB_SUPPORT)
 static struct tegra_usb_phy_platform_ops hsic_plat_ops = {
 	.open = hsic_platform_open,
 	.close = hsic_platform_close,
@@ -967,13 +1213,6 @@ static struct tegra_usb_platform_data tegra_ehci2_hsic_pdata = {
 		.remote_wakeup_supported = false,
 		.power_off_on_suspend = false,
 	},
-	.u_cfg.hsic = {
-		.sync_start_delay = 9,
-		.idle_wait_delay = 17,
-		.term_range_adj = 0,
-		.elastic_underrun_limit = 16,
-		.elastic_overrun_limit = 16,
-	},
 	.ops = &hsic_plat_ops,
 };
 
@@ -987,6 +1226,55 @@ static struct tegra_usb_platform_data tegra_udc_pdata = {
 		.vbus_gpio = -1,
 		.charging_supported = false,
 		.remote_wakeup_supported = false,
+	},
+	.u_cfg.utmi = {
+		.hssync_start_delay = 0,
+		.elastic_limit = 16,
+		.idle_wait_delay = 17,
+		.term_range_adj = 6,
+		.xcvr_setup = 8,
+		.xcvr_lsfslew = 2,
+		.xcvr_lsrslew = 2,
+		.xcvr_setup_offset = 0,
+		.xcvr_use_fuses = 1,
+	},
+};
+
+static struct tegra_usb_platform_data tegra_ehci2_utmi_pdata = {
+	.port_otg = false,
+	.has_hostpc = true,
+	.phy_intf = TEGRA_USB_PHY_INTF_UTMI,
+	.op_mode        = TEGRA_USB_OPMODE_HOST,
+	.u_data.host = {
+		.vbus_gpio = -1,
+		.hot_plug = false,
+		.remote_wakeup_supported = true,
+		.power_off_on_suspend = true,
+	},
+	.u_cfg.utmi = {
+		.hssync_start_delay = 0,
+		.elastic_limit = 16,
+		.idle_wait_delay = 17,
+		.term_range_adj = 6,
+		.xcvr_setup = 15,
+		.xcvr_lsfslew = 2,
+		.xcvr_lsrslew = 2,
+		.xcvr_setup_offset = 0,
+		.xcvr_use_fuses = 1,
+	},
+};
+
+static struct tegra_usb_platform_data tegra_ehci3_utmi_pdata = {
+	.port_otg = false,
+	.has_hostpc = true,
+	.phy_intf = TEGRA_USB_PHY_INTF_UTMI,
+	.op_mode = TEGRA_USB_OPMODE_HOST,
+	.u_data.host = {
+		.vbus_gpio = -1,
+		.vbus_reg = "vdd_vbus_typea_usb",
+		.hot_plug = true,
+		.remote_wakeup_supported = true,
+		.power_off_on_suspend = true,
 	},
 	.u_cfg.utmi = {
 		.hssync_start_delay = 0,
@@ -1026,61 +1314,13 @@ static struct tegra_usb_platform_data tegra_ehci1_utmi_pdata = {
 	},
 };
 
-static struct tegra_usb_platform_data tegra_ehci2_utmi_pdata = {
-	.port_otg = false,
-	.has_hostpc = true,
-	.phy_intf = TEGRA_USB_PHY_INTF_UTMI,
-	.op_mode	= TEGRA_USB_OPMODE_HOST,
-	.u_data.host = {
-		.vbus_gpio = -1,
-		.hot_plug = false,
-		.remote_wakeup_supported = true,
-		.power_off_on_suspend = true,
-	},
-	.u_cfg.utmi = {
-		.hssync_start_delay = 0,
-		.elastic_limit = 16,
-		.idle_wait_delay = 17,
-		.term_range_adj = 6,
-		.xcvr_setup = 15,
-		.xcvr_lsfslew = 2,
-		.xcvr_lsrslew = 2,
-		.xcvr_setup_offset = 0,
-		.xcvr_use_fuses = 1,
-	},
-};
-
-static struct tegra_usb_platform_data tegra_ehci3_utmi_pdata = {
-	.port_otg = false,
-	.has_hostpc = true,
-	.phy_intf = TEGRA_USB_PHY_INTF_UTMI,
-	.op_mode	= TEGRA_USB_OPMODE_HOST,
-	.u_data.host = {
-		.vbus_gpio = -1,
-		.vbus_reg = "vdd_vbus_typea_usb",
-		.hot_plug = true,
-		.remote_wakeup_supported = true,
-		.power_off_on_suspend = true,
-	},
-	.u_cfg.utmi = {
-		.hssync_start_delay = 0,
-		.elastic_limit = 16,
-		.idle_wait_delay = 17,
-		.term_range_adj = 6,
-		.xcvr_setup = 8,
-		.xcvr_lsfslew = 2,
-		.xcvr_lsrslew = 2,
-		.xcvr_setup_offset = 0,
-		.xcvr_use_fuses = 1,
-	},
-};
-
 static struct tegra_usb_otg_data tegra_otg_pdata = {
 	.ehci_device = &tegra_ehci1_device,
 	.ehci_pdata = &tegra_ehci1_utmi_pdata,
 };
+#endif
 
-#if CONFIG_USB_SUPPORT
+#if defined(CONFIG_USB_SUPPORT)
 static void cardhu_usb_init(void)
 {
 	struct board_info bi;
@@ -1119,19 +1359,6 @@ static void cardhu_usb_init(void)
 #else
 static void cardhu_usb_init(void) { }
 #endif
-
-static void cardhu_gps_init(void)
-{
-	tegra_gpio_enable(TEGRA_GPIO_PU2);
-	tegra_gpio_enable(TEGRA_GPIO_PU3);
-}
-
-static void cardhu_nfc_init(void)
-{
-	tegra_gpio_enable(TEGRA_GPIO_PX0);
-	tegra_gpio_enable(TEGRA_GPIO_PP3);
-	tegra_gpio_enable(TEGRA_GPIO_PO7);
-}
 
 static struct baseband_power_platform_data tegra_baseband_power_data = {
 	.baseband_type = BASEBAND_XMM,
@@ -1184,10 +1411,17 @@ static void cardhu_pci_init(void)
 		cardhu_pci_platform_data.port_status[2] = 1;
 		cardhu_pci_platform_data.use_dock_detect = 1;
 		cardhu_pci_platform_data.gpio = DOCK_DETECT_GPIO;
+	} else if (board_info.board_id == BOARD_PM315) {
+		cardhu_pci_platform_data.port_status[0] = 1;
+		cardhu_pci_platform_data.port_status[1] = 0;
+		cardhu_pci_platform_data.port_status[2] = 1;
+		cardhu_pci_platform_data.use_dock_detect = 0;
+		cardhu_pci_platform_data.gpio = 0;
 	}
 	if ((board_info.board_id == BOARD_E1186) ||
-		(board_info.board_id == BOARD_E1187) ||
-		(board_info.board_id == BOARD_E1291)) {
+			(board_info.board_id == BOARD_E1187) ||
+			(board_info.board_id == BOARD_E1291) ||
+			(board_info.board_id == BOARD_PM315)) {
 		tegra_pci_device.dev.platform_data = &cardhu_pci_platform_data;
 		platform_device_register(&tegra_pci_device);
 	}
@@ -1210,7 +1444,7 @@ static void cardhu_modem_init(void)
 		} else {
 			w_disable_gpio = TEGRA_GPIO_PDD5;
 		}
-		tegra_gpio_enable(w_disable_gpio);
+
 		ret = gpio_request(w_disable_gpio, "w_disable_gpio");
 		if (ret < 0)
 			pr_err("%s: gpio_request failed for gpio %d\n",
@@ -1230,22 +1464,9 @@ static void cardhu_modem_init(void)
 				break;
 			}
 			gpio_direction_output(TEGRA_GPIO_PH7, 1);
-			tegra_gpio_enable(TEGRA_GPIO_PH7);
 		}
 		break;
 	case BOARD_E1186:
-		tegra_gpio_enable(
-			tegra_baseband_power_data.modem.xmm.bb_rst);
-		tegra_gpio_enable(
-			tegra_baseband_power_data.modem.xmm.bb_on);
-		tegra_gpio_enable(
-			tegra_baseband_power_data.modem.xmm.ipc_bb_wake);
-		tegra_gpio_enable(
-			tegra_baseband_power_data.modem.xmm.ipc_ap_wake);
-		tegra_gpio_enable(
-			tegra_baseband_power_data.modem.xmm.ipc_hsic_active);
-		tegra_gpio_enable(
-			tegra_baseband_power_data.modem.xmm.ipc_hsic_sus_req);
 		platform_device_register(&tegra_baseband_power_device);
 		platform_device_register(&tegra_baseband_power2_device);
 		break;
@@ -1266,7 +1487,12 @@ static void cardhu_sata_init(void) { }
 
 static void __init tegra_cardhu_init(void)
 {
-	tegra_thermal_init(&thermal_data);
+	struct board_info board_info;
+
+	tegra_get_board_info(&board_info);
+	tegra_thermal_init(&thermal_data,
+				throttle_list,
+				ARRAY_SIZE(throttle_list));
 	tegra_clk_init_from_table(cardhu_clk_init_table);
 	cardhu_pinmux_init();
 	cardhu_i2c_init();
@@ -1276,14 +1502,26 @@ static void __init tegra_cardhu_init(void)
 	cardhu_edp_init();
 #endif
 	cardhu_uart_init();
+	tegra_camera_init();
 	platform_add_devices(cardhu_devices, ARRAY_SIZE(cardhu_devices));
+	switch (board_info.board_id) {
+	case BOARD_PM315:
+		platform_add_devices(beaver_audio_devices,
+				ARRAY_SIZE(beaver_audio_devices));
+		break;
+	default:
+		platform_add_devices(cardhu_audio_devices,
+				ARRAY_SIZE(cardhu_audio_devices));
+
+		break;
+	}
 	tegra_ram_console_debug_init();
+	tegra_io_dpd_init();
 	cardhu_sdhci_init();
 	cardhu_regulator_init();
 	cardhu_dtv_init();
 	cardhu_suspend_init();
 	cardhu_touch_init();
-	cardhu_gps_init();
 	cardhu_modem_init();
 	cardhu_kbc_init();
 	cardhu_scroll_init();
@@ -1292,28 +1530,39 @@ static void __init tegra_cardhu_init(void)
 	cardhu_pmon_init();
 	cardhu_sensors_init();
 	cardhu_setup_bluesleep();
-	cardhu_sata_init();
+	/*
+	 * if you want to add support for SATA in your board
+	 * then add your board check here like
+	 * board_info.board_id == BOARD_E1186
+	 */
+	if (board_info.board_id == BOARD_PM315)
+		cardhu_sata_init();
 	//audio_wired_jack_init();
 	cardhu_pins_state_init();
 	cardhu_emc_init();
 	tegra_release_bootloader_fb();
-	cardhu_nfc_init();
 	cardhu_pci_init();
 #ifdef CONFIG_TEGRA_WDT_RECOVERY
 	tegra_wdt_recovery_init();
 #endif
+	tegra_serial_debug_init(TEGRA_UARTD_BASE, INT_WDT_CPU, NULL, -1, -1);
 }
 
 static void __init tegra_cardhu_reserve(void)
 {
 #if defined(CONFIG_NVMAP_CONVERT_CARVEOUT_TO_IOVMM)
-	/* support 1920X1200 with 24bpp */
-	tegra_reserve(0, SZ_8M + SZ_1M, SZ_8M + SZ_1M);
+	/* Support 1920X1080 32bpp,double buffered on HDMI*/
+	tegra_reserve(0, SZ_8M + SZ_1M, SZ_16M);
 #else
 	tegra_reserve(SZ_128M, SZ_8M, SZ_8M);
 #endif
 	tegra_ram_console_debug_reserve(SZ_1M);
 }
+
+static const char *cardhu_dt_board_compat[] = {
+	"nvidia,cardhu",
+	NULL
+};
 
 MACHINE_START(CARDHU, "cardhu")
 	.boot_params    = 0x80000100,
@@ -1323,4 +1572,5 @@ MACHINE_START(CARDHU, "cardhu")
 	.init_irq       = tegra_init_irq,
 	.timer          = &tegra_timer,
 	.init_machine   = tegra_cardhu_init,
+	.dt_compat	= cardhu_dt_board_compat,
 MACHINE_END

@@ -1,5 +1,7 @@
 GCOV_PROFILE := y
 
+subdir-ccflags-y := -Werror
+
 # Tegra platform Support
 snd-soc-tegra-pcm-objs := tegra_pcm.o
 snd-soc-tegra-tdm-pcm-objs := tegra_tdm_pcm.o
@@ -31,7 +33,7 @@ snd-soc-tegra-max98088-objs := tegra_max98088.o
 snd-soc-tegra-aic326x-objs := tegra_aic326x.o
 snd-soc-tegra-rt5640-objs := tegra_rt5640.o
 snd-soc-tegra-max98095-objs := tegra_max98095.o
-snd-soc-tegra-p1852-objs := tegra_p1852.o
+snd-soc-tegra-vcm-objs := tegra_vcm.o
 
 obj-$(CONFIG_SND_SOC_TEGRA_WM8903) += snd-soc-tegra-wm8903.o
 obj-$(CONFIG_SND_SOC_TEGRA_TRIMSLICE) += snd-soc-tegra-trimslice.o
@@ -40,4 +42,5 @@ obj-$(CONFIG_SND_SOC_TEGRA_MAX98088) += snd-soc-tegra-max98088.o
 obj-$(CONFIG_SND_SOC_TEGRA_TLV320AIC326X) += snd-soc-tegra-aic326x.o
 obj-$(CONFIG_SND_SOC_TEGRA_RT5640) += snd-soc-tegra-rt5640.o
 obj-$(CONFIG_SND_SOC_TEGRA_MAX98095) += snd-soc-tegra-max98095.o
-obj-$(CONFIG_SND_SOC_TEGRA_P1852) += snd-soc-tegra-p1852.o
+obj-$(CONFIG_SND_SOC_TEGRA_P1852) += snd-soc-tegra-vcm.o
+obj-$(CONFIG_SND_SOC_TEGRA_P852) += snd-soc-tegra-vcm.o

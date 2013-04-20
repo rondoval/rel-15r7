@@ -52,8 +52,8 @@ static const struct snd_pcm_hardware tegra_pcm_hardware = {
 	.channels_min		= 1,
 	.channels_max		= 2,
 	.period_bytes_min	= 128,
-	.period_bytes_max	= PAGE_SIZE,
-	.periods_min		= 2,
+	.period_bytes_max	= PAGE_SIZE * 2,
+	.periods_min		= 1,
 	.periods_max		= 8,
 	.buffer_bytes_max	= PAGE_SIZE * 8,
 	.fifo_size		= 4,
@@ -70,7 +70,11 @@ static void tegra_pcm_queue_dma(struct tegra_runtime_data *prtd)
 	if (++prtd->dma_req_idx >= prtd->dma_req_count)
 		prtd->dma_req_idx -= prtd->dma_req_count;
 
-	addr = buf->addr + prtd->dma_pos;
+	if (prtd->avp_dma_addr)
+		addr = prtd->avp_dma_addr + prtd->dma_pos;
+	else
+		addr = buf->addr + prtd->dma_pos;
+
 	prtd->dma_pos += dma_req->size;
 	if (prtd->dma_pos >= prtd->dma_pos_end)
 		prtd->dma_pos = 0;
@@ -272,6 +276,15 @@ int tegra_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 		prtd->dma_pos_end = frames_to_bytes(runtime, runtime->periods * runtime->period_size);
 		prtd->period_index = 0;
 		prtd->dma_req_idx = 0;
+		if (prtd->disable_intr) {
+			prtd->dma_req_count = 1;
+			prtd->dma_req[0].complete = NULL;
+		} else if (!prtd->dma_req[0].complete) {
+			prtd->dma_req[0].complete = dma_complete_callback;
+			prtd->dma_req_count =
+				(MAX_DMA_REQ_COUNT <= runtime->periods) ?
+				MAX_DMA_REQ_COUNT : runtime->periods;
+		}
 		/* Fall-through */
 	case SNDRV_PCM_TRIGGER_RESUME:
 	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
@@ -289,8 +302,9 @@ int tegra_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 		spin_unlock_irqrestore(&prtd->lock, flags);
 		tegra_dma_cancel(prtd->dma_chan);
 		for (i = 0; i < prtd->dma_req_count; i++) {
-			if (prtd->dma_req[i].status ==
-				-TEGRA_DMA_REQ_ERROR_ABORTED)
+			if (prtd->dma_req[i].complete &&
+				(prtd->dma_req[i].status ==
+				 -TEGRA_DMA_REQ_ERROR_ABORTED))
 				prtd->dma_req[i].complete(&prtd->dma_req[i]);
 		}
 		break;

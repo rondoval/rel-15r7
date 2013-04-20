@@ -64,6 +64,7 @@
 #include <linux/list.h>
 #include <linux/mutex.h>
 #include <linux/spinlock.h>
+#include <trace/events/power.h>
 #include <asm/cputime.h>
 
 #include <mach/clk.h>
@@ -74,6 +75,12 @@ struct clk;
 struct clk_mux_sel {
 	struct clk	*input;
 	u32		value;
+};
+
+struct clk_backup {
+	struct clk	*input;
+	u32		value;
+	unsigned long	bus_rate;
 };
 
 struct clk_pll_freq_table {
@@ -152,7 +159,7 @@ struct clk {
 	u32				reg_shift;
 
 	struct list_head		shared_bus_list;
-	struct clk_mux_sel		shared_bus_backup;
+	struct clk_backup		shared_bus_backup;
 
 	union {
 		struct {
@@ -249,9 +256,12 @@ long tegra_emc_round_rate(unsigned long rate);
 struct clk *tegra_emc_predict_parent(unsigned long rate, u32 *div_value);
 void tegra_emc_timing_invalidate(void);
 #ifdef CONFIG_ARCH_TEGRA_2x_SOC
+static inline int tegra_emc_backup(unsigned long rate)
+{ return 0; }
 static inline bool tegra_clk_is_parent_allowed(struct clk *c, struct clk *p)
 { return true; }
 #else
+int tegra_emc_backup(unsigned long rate);
 bool tegra_clk_is_parent_allowed(struct clk *c, struct clk *p);
 #endif
 
@@ -272,6 +282,7 @@ static inline bool clk_cansleep(struct clk *c)
 
 static inline void clk_lock_save(struct clk *c, unsigned long *flags)
 {
+	trace_clock_lock(c->name, c->rate, smp_processor_id());
 	if (clk_cansleep(c)) {
 		*flags = 0;
 		mutex_lock(&c->mutex);
@@ -286,6 +297,7 @@ static inline void clk_unlock_restore(struct clk *c, unsigned long *flags)
 		mutex_unlock(&c->mutex);
 	else
 		spin_unlock_irqrestore(&c->spinlock, *flags);
+	trace_clock_unlock(c->name, c->rate, smp_processor_id());
 }
 
 static inline void clk_lock_init(struct clk *c)

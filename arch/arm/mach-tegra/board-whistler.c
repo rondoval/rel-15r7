@@ -1,7 +1,7 @@
 /*
  * arch/arm/mach-tegra/board-whistler.c
  *
- * Copyright (c) 2010 - 2011, NVIDIA Corporation.
+ * Copyright (c) 2010-2012 NVIDIA Corporation.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -37,6 +37,7 @@
 #include <linux/mfd/max8907c.h>
 #include <linux/memblock.h>
 #include <linux/tegra_uart.h>
+#include <linux/rfkill-gpio.h>
 
 #include <mach/clk.h>
 #include <mach/iomap.h>
@@ -169,21 +170,21 @@ static void __init whistler_uart_init(void)
 	platform_add_devices(whistler_uart_devices,
 				ARRAY_SIZE(whistler_uart_devices));
 }
-
-static struct resource whistler_bcm4329_rfkill_resources[] = {
+static struct rfkill_gpio_platform_data whistler_bt_rfkill_pdata[] = {
 	{
-		.name	= "bcm4329_nshutdown_gpio",
-		.start	= TEGRA_GPIO_PU0,
-		.end	= TEGRA_GPIO_PU0,
-		.flags	= IORESOURCE_IO,
+		.name		= "bt_rfkill",
+		.shutdown_gpio  = TEGRA_GPIO_PU0,
+		.reset_gpio     = TEGRA_GPIO_INVALID,
+		.type		= RFKILL_TYPE_BLUETOOTH,
 	},
 };
 
-static struct platform_device whistler_bcm4329_rfkill_device = {
-	.name		= "bcm4329_rfkill",
-	.id		= -1,
-	.num_resources	= ARRAY_SIZE(whistler_bcm4329_rfkill_resources),
-	.resource	= whistler_bcm4329_rfkill_resources,
+static struct platform_device whistler_bt_rfkill_device = {
+	.name = "rfkill_gpio",
+	.id   = -1,
+	.dev  = {
+		.platform_data  = whistler_bt_rfkill_pdata,
+	},
 };
 
 static struct resource whistler_bluesleep_resources[] = {
@@ -217,8 +218,6 @@ static struct platform_device whistler_bluesleep_device = {
 static void __init whistler_setup_bluesleep(void)
 {
 	platform_device_register(&whistler_bluesleep_device);
-	tegra_gpio_enable(TEGRA_GPIO_PU6);
-	tegra_gpio_enable(TEGRA_GPIO_PU1);
 	return;
 }
 
@@ -353,12 +352,32 @@ static struct platform_device tegra_camera = {
 };
 
 static struct tegra_asoc_platform_data whistler_audio_pdata = {
-	.gpio_spkr_en = -1,
-	.gpio_hp_det = TEGRA_GPIO_HP_DET,
-	.gpio_hp_mute = -1,
-	.gpio_int_mic_en = -1,
-	.gpio_ext_mic_en = -1,
-	.debounce_time_hp = 200,
+	.gpio_spkr_en		= -1,
+	.gpio_hp_det		= TEGRA_GPIO_HP_DET,
+	.gpio_hp_mute		= -1,
+	.gpio_int_mic_en	= -1,
+	.gpio_ext_mic_en	= -1,
+	.debounce_time_hp	= 200,
+	.i2s_param[HIFI_CODEC]	= {
+		.audio_port_id	= 0,
+		.is_i2s_master	= 1,
+		.i2s_mode	= TEGRA_DAIFMT_I2S,
+		.sample_size	= 16,
+	},
+	.i2s_param[BASEBAND]	= {
+		.audio_port_id	= 2,
+		.is_i2s_master	= 1,
+		.i2s_mode	= TEGRA_DAIFMT_DSP_A,
+		.sample_size	= 16,
+		.rate		= 8000,
+		.channels	= 1,
+	},
+	.i2s_param[BT_SCO]	= {
+		.sample_size	= 16,
+		.audio_port_id	= 3,
+		.is_i2s_master	= 1,
+		.i2s_mode	= TEGRA_DAIFMT_DSP_A,
+	},
 };
 
 static struct platform_device whistler_audio_aic326x_device = {
@@ -393,7 +412,7 @@ static struct platform_device *whistler_devices[] __initdata = {
 	&spdif_dit_device,
 	&bluetooth_dit_device,
 	&baseband_dit_device,
-	&whistler_bcm4329_rfkill_device,
+	&whistler_bt_rfkill_device,
 	&tegra_pcm_device,
 	&whistler_audio_aic326x_device,
 	&whistler_audio_wm8753_device,
@@ -414,30 +433,15 @@ static const struct i2c_board_info whistler_i2c_touch_info[] = {
 
 static int __init whistler_touch_init(void)
 {
-	tegra_gpio_enable(TEGRA_GPIO_PC6);
 	i2c_register_board_info(0, whistler_i2c_touch_info, 1);
 
-	return 0;
-}
-
-static int __init whistler_scroll_init(void)
-{
-	int i;
-	for (i = 0; i < ARRAY_SIZE(scroll_keys); i++)
-		tegra_gpio_enable(scroll_keys[i].gpio);
-
-	return 0;
-}
-
-static int __init whistler_gps_init(void)
-{
-	tegra_gpio_enable(TEGRA_GPIO_PU4);
 	return 0;
 }
 
 static struct tegra_usb_platform_data tegra_udc_pdata = {
 	.port_otg = true,
 	.has_hostpc = false,
+	.builtin_host_disabled = true,
 	.phy_intf = TEGRA_USB_PHY_INTF_UTMI,
 	.op_mode = TEGRA_USB_OPMODE_DEVICE,
 	.u_data.dev = {
@@ -462,33 +466,11 @@ static struct tegra_usb_platform_data tegra_udc_pdata = {
 static struct tegra_usb_platform_data tegra_ehci1_utmi_pdata = {
 	.port_otg = true,
 	.has_hostpc = false,
+	.builtin_host_disabled = true,
 	.phy_intf = TEGRA_USB_PHY_INTF_UTMI,
 	.op_mode	= TEGRA_USB_OPMODE_HOST,
 	.u_data.host = {
 		.vbus_gpio = TEGRA_GPIO_PN6,
-		.vbus_reg = NULL,
-		.hot_plug = true,
-		.remote_wakeup_supported = false,
-		.power_off_on_suspend = true,
-	},
-	.u_cfg.utmi = {
-		.hssync_start_delay = 9,
-		.elastic_limit = 16,
-		.idle_wait_delay = 17,
-		.term_range_adj = 6,
-		.xcvr_setup = 8,
-		.xcvr_lsfslew = 2,
-		.xcvr_lsrslew = 2,
-	},
-};
-
-static struct tegra_usb_platform_data tegra_ehci3_utmi_pdata = {
-	.port_otg = false,
-	.has_hostpc = false,
-	.phy_intf = TEGRA_USB_PHY_INTF_UTMI,
-	.op_mode	= TEGRA_USB_OPMODE_HOST,
-	.u_data.host = {
-		.vbus_gpio = TEGRA_GPIO_PD3,
 		.vbus_reg = NULL,
 		.hot_plug = true,
 		.remote_wakeup_supported = false,
@@ -511,7 +493,6 @@ static struct tegra_usb_otg_data tegra_otg_pdata = {
 };
 
 #define SERIAL_NUMBER_LENGTH 20
-static char usb_serial_num[SERIAL_NUMBER_LENGTH];
 static void whistler_usb_init(void)
 {
 	tegra_otg_device.dev.platform_data = &tegra_otg_pdata;
@@ -535,9 +516,7 @@ static void __init tegra_whistler_init(void)
 	whistler_sensors_init();
 	whistler_touch_init();
 	whistler_kbc_init();
-	whistler_gps_init();
 	whistler_usb_init();
-	whistler_scroll_init();
 	whistler_emc_init();
 	if (modem_id == 0x1)
 		whistler_baseband_init();
@@ -560,12 +539,18 @@ void __init tegra_whistler_reserve(void)
 	tegra_ram_console_debug_reserve(SZ_1M);
 }
 
+static const char *whistler_dt_board_compat[] = {
+	"nvidia,whistler",
+	NULL
+};
+
 MACHINE_START(WHISTLER, "whistler")
 	.boot_params    = 0x00000100,
 	.map_io         = tegra_map_common_io,
-	.reserve        = tegra_whistler_reserve,
 	.init_early	= tegra_init_early,
 	.init_irq       = tegra_init_irq,
+	.reserve        = tegra_whistler_reserve,
 	.timer          = &tegra_timer,
 	.init_machine   = tegra_whistler_init,
+	.dt_compat	= whistler_dt_board_compat,
 MACHINE_END

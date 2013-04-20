@@ -2,7 +2,7 @@
  * drivers/media/video/tegra/tegra_camera.c
  *
  * Copyright (C) 2010 Google, Inc.
- * Copyright (C) 2012 Nvidia Corp
+ * Copyright (c) 2010-2012, NVIDIA Corporation.  All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -58,6 +58,25 @@ struct tegra_camera_block {
 	bool is_enabled;
 };
 
+/*
+ * Declare and define two static variables to provide hint to
+ * gr3d module
+ */
+static int tegra_camera_on;
+static struct tegra_camera_platform_data *pdata;
+
+int is_tegra_camera_on(void)
+{
+	if (pdata) {
+		if (pdata->limit_3d_emc_clk)
+			return tegra_camera_on;
+		else
+			return 0;
+	} else {
+		return 0;
+	}
+}
+
 static int tegra_camera_enable_clk(struct tegra_camera_dev *dev)
 {
 	clk_enable(dev->vi_clk);
@@ -96,17 +115,18 @@ static int tegra_camera_disable_clk(struct tegra_camera_dev *dev)
 
 static int tegra_camera_enable_emc(struct tegra_camera_dev *dev)
 {
+	int ret = tegra_emc_disable_eack();
 	clk_enable(dev->emc_clk);
 #ifdef CONFIG_ARCH_TEGRA_2x_SOC
 	clk_set_rate(dev->emc_clk, 300000000);
 #endif
-	return 0;
+	return ret;
 }
 
 static int tegra_camera_disable_emc(struct tegra_camera_dev *dev)
 {
 	clk_disable(dev->emc_clk);
-	return 0;
+	return tegra_emc_enable_eack();
 }
 
 static int tegra_camera_clk_set_rate(struct tegra_camera_dev *dev)
@@ -183,10 +203,13 @@ static int tegra_camera_clk_set_rate(struct tegra_camera_dev *dev)
 			tegra_clk_cfg_ex(clk, TEGRA_CLK_VI_INP_SEL, 2);
 
 #ifdef CONFIG_ARCH_TEGRA_2x_SOC
-		u32 val;
-		void __iomem *apb_misc = IO_ADDRESS(TEGRA_APB_MISC_BASE);
-		val = readl(apb_misc + 0x42c);
-		writel(val | 0x1, apb_misc + 0x42c);
+		{
+			u32 val;
+			void __iomem *apb_misc =
+				IO_ADDRESS(TEGRA_APB_MISC_BASE);
+			val = readl(apb_misc + 0x42c);
+			writel(val | 0x1, apb_misc + 0x42c);
+		}
 #endif
 	}
 
@@ -223,6 +246,7 @@ static int tegra_camera_power_on(struct tegra_camera_dev *dev)
 			__func__);
 #endif
 	dev->power_on = 1;
+	tegra_camera_on = dev->power_on;
 	return ret;
 }
 
@@ -251,6 +275,7 @@ static int tegra_camera_power_off(struct tegra_camera_dev *dev)
 		}
 	}
 	dev->power_on = 0;
+	tegra_camera_on = dev->power_on;
 	return ret;
 }
 
@@ -421,6 +446,7 @@ static int tegra_camera_probe(struct platform_device *pdev)
 	mutex_unlock(&dev->tegra_camera_lock);
 
 	dev->dev = &pdev->dev;
+	pdata = pdev->dev.platform_data;
 
 	/* Get regulator pointer */
 #ifdef CONFIG_ARCH_TEGRA_2x_SOC
